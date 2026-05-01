@@ -16,8 +16,9 @@ def ollama_chat(messages):
             messages=messages,
             stream=False,
             options={
-                'temperature': 0.1,  # More deterministic for tool use
-                'num_predict': 2048
+                'temperature': 0.0,  # Deterministic for strict tool use (Mistral 7B best practice)
+                'num_predict': 2048,
+                'stop': ['[INST]', '[/INST]']  # Mistral 7B v0.3 stop tokens
             }
         )
         
@@ -32,6 +33,23 @@ def ollama_chat(messages):
         return f"[ERR] Erreur Ollama: {e}"
 
 # ---------- TOOLS FS ----------
+
+def file_list(path):
+    """List files in a directory"""
+    try:
+        expanded_path = os.path.expanduser(path)
+        if not os.path.isabs(expanded_path):
+            expanded_path = os.path.join(os.getcwd(), expanded_path)
+        
+        if not os.path.isdir(expanded_path):
+            return f"[ERR] {expanded_path} n'est pas un répertoire"
+        
+        files = os.listdir(expanded_path)
+        return f"[OK] Contenu de {expanded_path}:\n" + "\n".join(f"- {f}" for f in sorted(files))
+    except PermissionError:
+        return f"[ERR] Permission refusée pour {expanded_path}"
+    except Exception as e:
+        return f"[ERR] Impossible de lister {expanded_path}: {e}"
 
 def file_read(path):
     """Read file content"""
@@ -108,32 +126,48 @@ def ssh_exec(host, user, command, port=22, key_path=None, password=None):
 # ---------- ACTION PARSING ----------
 
 def detect_action(text):
-    """Detect and parse action tags from model response"""
+    """Detect and parse action tags from model response
+    
+    Accepts ONLY exact XML tags (no surrounding text).
+    Tolerates self-closing tags for write/append by converting to empty content.
+    """
     text = text.strip()
 
-    # Try to find action tags anywhere in the text (not just full match)
-    # <read path="/tmp/test.py" />
-    m = re.search(r'<read\s+path="(.*?)"\s*/>', text, re.S)
+    # Vérifie que c'est EXACTEMENT une balise (pas de texte avant/après)
+    if not (text.startswith('<') and text.endswith('>')):
+        return None
+
+    # <list path="..." />
+    m = re.fullmatch(r'<list\s+path="(.*?)"\s*/>', text)
+    if m:
+        return ("list", m.group(1))
+
+    # <read path="..." />
+    m = re.fullmatch(r'<read\s+path="(.*?)"\s*/>', text)
     if m:
         return ("read", m.group(1))
 
-    # <write path="/tmp/test.py">content</write>
-    m = re.search(r'<write\s+path="(.*?)">(.*?)</write>', text, re.S)
+    # <write path="...">content</write> OR <write path="..." /> (tolerated -> empty content)
+    m = re.fullmatch(r'<write\s+path="(.*?)"\s*/>', text)
+    if m:
+        return ("write", m.group(1), "")  # Tolerate self-closing: treat as empty file
+    m = re.fullmatch(r'<write\s+path="(.*?)">(.*?)</write>', text, re.S)
     if m:
         return ("write", m.group(1), m.group(2))
 
-    # <append path="/tmp/test.py">content</append>
-    m = re.search(r'<append\s+path="(.*?)">(.*?)</append>', text, re.S)
+    # <append path="...">content</append> OR <append path="..." /> (tolerated -> empty)
+    m = re.fullmatch(r'<append\s+path="(.*?)"\s*/>', text)
+    if m:
+        return ("append", m.group(1), "")  # Tolerate self-closing: treat as empty append
+    m = re.fullmatch(r'<append\s+path="(.*?)">(.*?)</append>', text, re.S)
     if m:
         return ("append", m.group(1), m.group(2))
 
     # <ssh host="x" user="y" port="22">command</ssh>
-    m = re.search(r'<ssh\s+host="(.*?)"\s+user="(.*?)"(?:\s+port="(.*?)")?>(.*?)</ssh>', text, re.S)
+    m = re.fullmatch(r'<ssh\s+host="(.*?)"\s+user="(.*?)"(?:\s+port="(.*?)")?>(.*?)</ssh>', text, re.S)
     if m:
-        host = m.group(1)
-        user = m.group(2)
-        port = int(m.group(3)) if m.group(3) else 22
-        cmd = m.group(4).strip()
+        host, user, port, cmd = m.group(1), m.group(2), m.group(3), m.group(4).strip()
+        port = int(port) if port else 22
         return ("ssh", host, user, port, cmd)
 
     return None
@@ -141,38 +175,23 @@ def detect_action(text):
 # ---------- MAIN LOOP ----------
 
 def main():
-    system_prompt = """Tu es un agent CLI intelligent. Tu as DEUX modes de réponse:
+    system_prompt = """Tu es un assistant CLI.
 
-MODE 1 - ACTIONS FILESYSTEM/SSH: Si la demande est explicitement une action sur le filesystem ou SSH, réponds UNIQUEMENT avec la balise XML correspondante. NE JAMAIS ajouter de texte.
+Règles STRICTES (une SEULE chose par réponse):
+1. Si demande de LISTER un répertoire → Réponds UNIQUEMENT: <list path="chemin" />
+2. Si demande de LIR un fichier → Réponds UNIQUEMENT: <read path="chemin" />
+3. Si demande d'ÉCRIRE un fichier → Réponds UNIQUEMENT: <write path="chemin">contenu</write>
+4. Si demande d'AJOUTER à un fichier → Réponds UNIQUEMENT: <append path="chemin">texte</append>
+5. Si demande SSH → Réponds UNIQUEMENT: <ssh host="ip" user="u" port="p">cmd</ssh>
+6. SINON → Réponds UNIQUEMENT en français naturel, SANS AUCUNE balise XML
 
-Actions valides et leurs balises:
-- Lire un fichier: <read path="chemin/fichier" />
-- Écrire un fichier: <write path="chemin/fichier">contenu exact</write>
-- Ajouter à un fichier: <append path="chemin/fichier">texte à ajouter</append>
-- Commande SSH: <ssh host="IP" user="user" port="22">commande</ssh>
+INTERDIT ABSOLUMENT:
+- Mélanger texte et balise dans une même réponse
+- Mentionner les balises XML dans les réponses naturelles
+- Suggérer des commandes shell
+- Utiliser balises auto-fermantes pour write/append
 
-MODE 2 - QUESTIONS NORMALES: Pour TOUTE autre demande (questions, discussions, etc.), réponds normalement en français sans aucune balise XML.
-
-EXEMPLES PRÉCIS:
---- ACTIONS (Mode 1) ---
-Q: "Lis le fichier test.py" → R: <read path="test.py" />
-Q: "Crée un fichier hello.txt avec Bonjour" → R: <write path="hello.txt">Bonjour</write>
-Q: "Ajoute la ligne print(x) à script.py" → R: <append path="script.py">print(x)</append>
-Q: "Fais un ls sur 192.168.1.1 avec user admin" → R: <ssh host="192.168.1.1" user="admin" port="22">ls</ssh>
-
---- QUESTIONS NORMALES (Mode 2) ---
-Q: "salut" → R: "Bonjour ! Comment puis-je vous aider ?"
-Q: "qui es-tu ?" → R: "Je suis un agent CLI qui peut interagir avec le filesystem et SSH."
-Q: "Quelle heure est-il ?" → R: "Je ne peux pas accéder à l'heure système, mais..."
-Q: "Explique moi comment fonctionne Python" → R: "Python est un langage de programmation..."
-
-RÈGLES STRICTES:
-1. Si la demande contient un verbe d'action (lis, crée, écris, ajoute, exécute, fais, SSH) + un fichier/serveur → Mode 1 (balise XML SEULE)
-2. Sinon → Mode 2 (réponse normale)
-3. NE JAMAIS mélanger les modes
-4. NE JAMAIS inventer des fichiers ou des actions
-5. Utilise chemins relatifs/absolus, ~ autorisé"""
-
+Utilise EXACTEMENT le chemin fourni."""
     messages = [{"role": "system", "content": system_prompt}]
 
     print(f"Agent local ({MODEL}) prêt. Tape une commande ou 'quit' pour sortir.\n")
@@ -200,7 +219,13 @@ RÈGLES STRICTES:
         if action:
             kind = action[0]
 
-            if kind == "read":
+            if kind == "list":
+                path = action[1]
+                result = file_list(path)
+                print(f"[ACTION]\n{result}\n")
+                messages.append({"role": "assistant", "content": result})
+
+            elif kind == "read":
                 path = action[1]
                 result = file_read(path)
                 print(f"[ACTION]\n{result}\n")
