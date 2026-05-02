@@ -114,6 +114,62 @@ def _append_jsonl(path: str, payload: dict):
         f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
+def _new_stats() -> dict:
+    return {
+        "user_inputs": 0,
+        "assistant_messages": 0,
+        "tool_calls": 0,
+        "tool_errors": 0,
+        "response_count": 0,
+        "response_total_s": 0.0,
+    }
+
+
+def _stats_to_text(stats: dict, title: str) -> str:
+    avg = (stats["response_total_s"] / stats["response_count"]) if stats["response_count"] else 0.0
+    return (
+        f"{title}\n"
+        f"- Messages user      : {stats['user_inputs']}\n"
+        f"- Messages assistant : {stats['assistant_messages']}\n"
+        f"- Appels outils      : {stats['tool_calls']}\n"
+        f"- Erreurs outils     : {stats['tool_errors']}\n"
+        f"- Réponses           : {stats['response_count']}\n"
+        f"- Latence moyenne    : {avg:.2f}s"
+    )
+
+
+def _load_all_logs_stats(log_dir: str) -> tuple[dict, int]:
+    stats = _new_stats()
+    files = 0
+    base = Path(log_dir)
+    if not base.exists():
+        return stats, files
+    for fp in sorted(base.glob("*.jsonl")):
+        files += 1
+        try:
+            with fp.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        evt = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    et = evt.get("type")
+                    if et == "user_input":
+                        stats["user_inputs"] += 1
+                    elif et == "assistant_message":
+                        stats["assistant_messages"] += 1
+                    elif et == "tool_call":
+                        stats["tool_calls"] += 1
+                        if evt.get("is_error"):
+                            stats["tool_errors"] += 1
+        except OSError:
+            continue
+    return stats, files
+
+
 def display_tool_call(name: str, args: dict, result: str):
     args_text = "  ".join(f"[dim]{k}=[/]{str(v)[:80]!r}" for k, v in args.items())
     console.print(f"  [bold yellow]⚙[/] [yellow]{name}[/]  {args_text}")
@@ -130,11 +186,18 @@ def run():
     resume_session = args.resume_session.strip() or None
     log_file = args.log_file.strip() or _default_log_path()
     auto_save = AUTO_SAVE_SESSION and not args.no_session_save
+    context_debug = args.context_debug
+    session_stats = _new_stats()
+    prompt_session = PromptSession(
+        completer=SlashCompleter(SLASH_COMMANDS),
+        complete_while_typing=True,
+        reserve_space_for_menu=6,
+    )
 
     console.print(render_banner(safety_mode))
     console.print(f"[dim]Répertoire: {os.getcwd()}[/]")
     console.print(f"[dim]Logs JSONL: {log_file}[/]")
-    console.print("[dim]Commandes: 'reset' pour nouvelle session · 'quit' pour quitter · Ctrl+C pour interrompre[/]\n")
+    console.print("[dim]Commandes: '/stats' · '/stats all' · '/reset' · '/quit' · Ctrl+C[/]\n")
 
     if session_file:
         os.makedirs(os.path.dirname(session_file) or ".", exist_ok=True)
@@ -197,6 +260,28 @@ def run():
                 console.print(f"[dim]Session sauvée: {path}[/]")
             continue
 
+        if user_input.lower() in ("/stats", "/stats session"):
+            console.print(Panel(
+                _stats_to_text(session_stats, "Stats session courante"),
+                title=f"[magenta]Stats[/]  [dim]{now_fr()}[/]",
+                border_style="magenta",
+                padding=(0, 1),
+            ))
+            console.print()
+            continue
+
+        if user_input.lower() in ("/stats all", "/stats toutes", "/stats tout"):
+            all_stats, files_count = _load_all_logs_stats(LOG_DIR)
+            text = _stats_to_text(all_stats, f"Stats globales ({files_count} logs)")
+            console.print(Panel(
+                text,
+                title=f"[magenta]Stats globales[/]  [dim]{now_fr()}[/]",
+                border_style="magenta",
+                padding=(0, 1),
+            ))
+            console.print()
+            continue
+
         t0 = time.time()
         _stop_timer = threading.Event()
 
@@ -238,13 +323,25 @@ def run():
                 status.start()
                 return selected
 
+            def on_event(evt: dict):
+                _append_jsonl(log_file, evt)
+                et = evt.get("type")
+                if et == "user_input":
+                    session_stats["user_inputs"] += 1
+                elif et == "assistant_message":
+                    session_stats["assistant_messages"] += 1
+                elif et == "tool_call":
+                    session_stats["tool_calls"] += 1
+                    if evt.get("is_error"):
+                        session_stats["tool_errors"] += 1
+
             try:
                 response = agent.run(
                     user_input,
                     on_tool_call=on_tool,
                     confirm_tool=confirm,
                     on_user_choice=user_choice,
-                    on_event=lambda evt: _append_jsonl(log_file, evt),
+                    on_event=on_event,
                 )
             except KeyboardInterrupt:
                 agent.reset()
@@ -257,6 +354,8 @@ def run():
             _timer_thread.join(timeout=0.3)
 
         total = time.time() - t0
+        session_stats["response_count"] += 1
+        session_stats["response_total_s"] += total
         console.print(f"  [dim]↳ {total:.1f}s[/]")
 
         console.print(Panel(
