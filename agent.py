@@ -106,7 +106,7 @@ _PROJECT_FILES = {"main.py", "agent.py", "config.py"}
 
 _TOOL_INVOCATION_RE = re.compile(r'^(\w+)\(\s*(\{.*\})\s*\)\s*$', re.S)
 
-def _extract_and_write(content: str) -> str | None:
+def _extract_and_write(content: str, on_tool_call: Callable[[str, dict, str], None] | None = None) -> str | None:
     """Extrait les blocs de code d'une réponse narrative et les écrit sur disque."""
     blocks = re.findall(r"```(\w*)\n(.*?)```", content, re.S)
     if not blocks:
@@ -125,6 +125,8 @@ def _extract_and_write(content: str) -> str | None:
             try:
                 args = json.loads(args_str)
                 result = dispatch(name, args)
+                if on_tool_call:
+                    on_tool_call(name, args, result)
                 results.append(result)
                 continue
             except (json.JSONDecodeError, Exception):
