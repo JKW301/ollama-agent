@@ -99,6 +99,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Désactive la sauvegarde auto de session.",
     )
+    parser.add_argument(
+        "--context-debug",
+        action="store_true",
+        help="Affiche les stats de compression contexte à chaque tour.",
+    )
     return parser.parse_args()
 
 
@@ -364,6 +369,20 @@ def run():
             border_style="green",
             padding=(0, 1),
         ))
+        if context_debug:
+            stats = getattr(agent, "last_context_stats", {}) or {}
+            in_msg = int(stats.get("input_messages", 0))
+            out_msg = int(stats.get("output_messages", 0))
+            in_chars = int(stats.get("input_chars", 0))
+            out_chars = int(stats.get("output_chars", 0))
+            msg_ratio = (out_msg / in_msg * 100.0) if in_msg else 100.0
+            char_ratio = (out_chars / in_chars * 100.0) if in_chars else 100.0
+            console.print(
+                "[dim]Context debug[/] "
+                f"[dim]msg {in_msg}->{out_msg} ({msg_ratio:.1f}%); "
+                f"chars {in_chars}->{out_chars} ({char_ratio:.1f}%); "
+                f"compressed={bool(stats.get('compressed', False))}[/]"
+            )
         console.print()
         if auto_save:
             path = agent.save_session()
