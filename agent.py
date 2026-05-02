@@ -6,6 +6,18 @@ from config import MODEL, MAX_STEPS, TEMPERATURE, NUM_PREDICT
 from tools import SCHEMAS, dispatch
 
 
+_NARRATION_PREFIXES = (
+    "je vais", "je vais lister", "je vais lire", "je vais exécuter",
+    "voici comment", "pour ce faire", "permettez-moi", "allow me",
+    "i will", "i'll", "let me",
+)
+
+def _is_narration(content: str) -> bool:
+    """Détecte une réponse-annonce sans action réelle."""
+    lower = content.strip().lower()
+    return any(lower.startswith(p) for p in _NARRATION_PREFIXES)
+
+
 def _extract_inline_tool_calls(content: str) -> list[dict] | None:
     """Fallback: Mistral retourne parfois les tool calls en JSON dans le content."""
     content = content.strip()
@@ -22,17 +34,16 @@ def _extract_inline_tool_calls(content: str) -> list[dict] | None:
         pass
     return None
 
-SYSTEM_PROMPT = """Tu es un assistant développeur CLI. Tu as accès à des outils pour:
-- Lire, écrire, lister des fichiers sur le système local
-- Exécuter des commandes shell (bash)
-- Te connecter à des serveurs distants via SSH
+SYSTEM_PROMPT = """Tu es un assistant développeur CLI.
+RÈGLE ABSOLUE : Dès qu'un outil peut répondre à la demande, APPELLE-LE IMMÉDIATEMENT sans aucune explication préalable.
+Ne décris JAMAIS ce que tu vas faire. Agis directement.
 
-Utilise les outils chaque fois que c'est nécessaire pour répondre à la demande.
-Tu peux enchaîner plusieurs appels d'outils dans une même conversation.
+Après un outil:
+- Si l'outil a réussi: réponds UNIQUEMENT par "OK" ou "Fait."
+- Si l'outil a échoué: répète l'erreur littérale entre guillemets.
 
-Après avoir utilisé un outil, réponds en UNE PHRASE courte en français.
-Ne répète jamais le contenu brut retourné par l'outil dans ta réponse finale.
-Réponds toujours en français."""
+Disponible : lire/écrire/lister fichiers, bash, SSH.
+Réponds TOUJOURS en français."""
 
 
 class Agent:
@@ -77,7 +88,15 @@ class Agent:
                     self.messages[-1] = {"role": "assistant", "content": ""}
 
             if not tool_calls:
-                return msg.get("content", "")
+                content = msg.get("content", "")
+                # Le modèle a annoncé une action sans l'exécuter → relance avec rappel
+                if _is_narration(content):
+                    self.messages.append({
+                        "role": "user",
+                        "content": "Appelle l'outil maintenant, ne l'annonce pas.",
+                    })
+                    continue
+                return content
 
             for tc in tool_calls:
                 name = tc["function"]["name"]
