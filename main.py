@@ -2,13 +2,22 @@ import os
 import sys
 import time
 import threading
+import argparse
+import json
 from datetime import datetime
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
 
 from agent import Agent
-from config import MODEL, CONFIRM_TOOLS
+from config import (
+    MODEL,
+    CONFIRM_TOOLS,
+    AGENT_SAFETY_MODE,
+    SESSION_DIR,
+    LOG_DIR,
+    AUTO_SAVE_SESSION,
+)
 
 MOIS = ["janvier","février","mars","avril","mai","juin",
         "juillet","août","septembre","octobre","novembre","décembre"]
@@ -19,7 +28,8 @@ def now_fr() -> str:
 
 console = Console()
 
-BANNER = f"""[cyan]              NNNN[black]..............[/black]NN[black]......[/black]NN[/cyan]
+def render_banner(safety_mode: str) -> str:
+    return f"""[cyan]              NNNN[black]..............[/black]NN[black]......[/black]NN[/cyan]
 [cyan]            NN[black]....[/black]NN[black]..........[/black]NN[black]..[/black]NN[black]..[/black]NN[black]..[/black]NN[/cyan]
 [cyan]          cNN..NNNN[black]............[/black]NN[black]....[/black]NN[black]....[/black]NN[/cyan]
 [cyan]        XNO..NN[black]........[/black]NNNNNN..NN[black]..........[/black]NN[/cyan]
@@ -30,7 +40,51 @@ BANNER = f"""[cyan]              NNNN[black]..............[/black]NN[black].....
 [cyan]            ,NNNNNN[black]........[/black]NN[black]........[/black]NN..NN[/cyan]
 [cyan]                  NNNNNNNNNNNNNNNNNNNNNN[/cyan]
 
-[cyan]  Mistral CLI Agent  ·  {MODEL}[/cyan]"""
+[cyan]  Mistral CLI Agent  ·  {MODEL}[/cyan]
+[cyan]  Safety mode        ·  {safety_mode}[/cyan]"""
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Mistral CLI Agent")
+    parser.add_argument(
+        "-s",
+        "--safety-mode",
+        choices=["strict", "balanced", "open"],
+        default=AGENT_SAFETY_MODE,
+        help="Override du mode de sécurité (défaut: AGENT_SAFETY_MODE/config).",
+    )
+    parser.add_argument(
+        "--session-file",
+        default="",
+        help="Chemin de session JSON (sauvegarde auto dans ce fichier).",
+    )
+    parser.add_argument(
+        "--resume-session",
+        default="",
+        help="Charge une session JSON existante avant de commencer.",
+    )
+    parser.add_argument(
+        "--log-file",
+        default="",
+        help="Chemin du log JSONL (sinon auto dans .agent_logs/).",
+    )
+    parser.add_argument(
+        "--no-session-save",
+        action="store_true",
+        help="Désactive la sauvegarde auto de session.",
+    )
+    return parser.parse_args()
+
+
+def _default_log_path() -> str:
+    os.makedirs(LOG_DIR, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return os.path.join(LOG_DIR, f"run-{ts}.jsonl")
+
+
+def _append_jsonl(path: str, payload: dict):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
 def display_tool_call(name: str, args: dict, result: str):
@@ -43,11 +97,38 @@ def display_tool_call(name: str, args: dict, result: str):
 
 
 def run():
-    console.print(BANNER)
+    args = parse_args()
+    safety_mode = args.safety_mode
+    session_file = args.session_file.strip() or None
+    resume_session = args.resume_session.strip() or None
+    log_file = args.log_file.strip() or _default_log_path()
+    auto_save = AUTO_SAVE_SESSION and not args.no_session_save
+
+    console.print(render_banner(safety_mode))
     console.print(f"[dim]Répertoire: {os.getcwd()}[/]")
+    console.print(f"[dim]Logs JSONL: {log_file}[/]")
     console.print("[dim]Commandes: 'reset' pour nouvelle session · 'quit' pour quitter · Ctrl+C pour interrompre[/]\n")
 
-    agent = Agent()
+    if session_file:
+        os.makedirs(os.path.dirname(session_file) or ".", exist_ok=True)
+    else:
+        os.makedirs(SESSION_DIR, exist_ok=True)
+
+    agent = Agent(safety_mode=safety_mode, session_path=session_file)
+
+    if resume_session:
+        try:
+            agent.load_session(resume_session)
+            console.print(f"[dim]Session chargée: {resume_session}[/]")
+        except Exception as e:
+            console.print(f"[bold red][ERR][/bold red] Impossible de charger la session: {e}")
+    _append_jsonl(log_file, {
+        "type": "session_start",
+        "at": datetime.now().isoformat(timespec="seconds"),
+        "cwd": os.getcwd(),
+        "safety_mode": agent.safety_mode,
+        "resume_session": resume_session or "",
+    })
 
     while True:
         try:
@@ -76,6 +157,9 @@ def run():
         if user_input.lower() == "reset":
             agent.reset()
             console.print("[dim]Session réinitialisée.[/]\n")
+            if auto_save:
+                path = agent.save_session()
+                console.print(f"[dim]Session sauvée: {path}[/]")
             continue
 
         t0 = time.time()
@@ -125,6 +209,7 @@ def run():
                     on_tool_call=on_tool,
                     confirm_tool=confirm,
                     on_user_choice=user_choice,
+                    on_event=lambda evt: _append_jsonl(log_file, evt),
                 )
             except KeyboardInterrupt:
                 agent.reset()
@@ -146,6 +231,9 @@ def run():
             padding=(0, 1),
         ))
         console.print()
+        if auto_save:
+            path = agent.save_session()
+            console.print(f"[dim]Session sauvée: {path}[/]")
 
 
 if __name__ == "__main__":
