@@ -1,20 +1,36 @@
 import os
+import sys
+import time
+import threading
+from datetime import datetime
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
-from rich.columns import Columns
-from rich.text import Text
 
 from agent import Agent
 from config import MODEL, CONFIRM_TOOLS
 
+MOIS = ["janvier","février","mars","avril","mai","juin",
+        "juillet","août","septembre","octobre","novembre","décembre"]
+
+def now_fr() -> str:
+    d = datetime.now()
+    return f"{d.day:02d} {MOIS[d.month-1]} {d.year}  {d.hour:02d}h{d.minute:02d}"
+
 console = Console()
 
-BANNER = f"""[bold cyan]
-  ╔══════════════════════════════════════╗
-  ║   Ollama Agent  ·  {MODEL:<18} ║
-  ╚══════════════════════════════════════╝
-[/]"""
+BANNER = f"""[cyan]              NNNN[black]..............[/black]NN[black]......[/black]NN[/cyan]
+[cyan]            NN[black]....[/black]NN[black]..........[/black]NN[black]..[/black]NN[black]..[/black]NN[black]..[/black]NN[/cyan]
+[cyan]          cNN..NNNN[black]............[/black]NN[black]....[/black]NN[black]....[/black]NN[/cyan]
+[cyan]        XNO..NN[black]........[/black]NNNNNN..NN[black]..........[/black]NN[/cyan]
+[cyan]        XNO.:NN[black]......[/black]NN[black]......[/black]NNNN..NN[black]..[/black]NN[black]..[/black]NN[/cyan]
+[cyan]        XNO.cNN....NN[black]........[/black]NN[black]......[/black]NN[black]......[/black]NN[/cyan]
+[cyan]        XNO...,NNNNNN....NN[black]....[/black]NNNNNN[black]....[/black]NNNNNN[/cyan]
+[cyan]          cNNNc...,NN[black]......[/black]NN[black]........[/black]NN..NN[/cyan]
+[cyan]            ,NNNNNN[black]........[/black]NN[black]........[/black]NN..NN[/cyan]
+[cyan]                  NNNNNNNNNNNNNNNNNNNNNN[/cyan]
+
+[cyan]  Mistral CLI Agent  ·  {MODEL}[/cyan]"""
 
 
 def display_tool_call(name: str, args: dict, result: str):
@@ -40,6 +56,16 @@ def run():
         if not user_input:
             continue
 
+        # Efface la ligne ">>> ..." et la remplace par le panneau
+        sys.stdout.write("\033[1A\033[2K\r")
+        sys.stdout.flush()
+        console.print(Panel(
+            user_input,
+            title=f"[cyan]Vous[/]  [dim]{now_fr()}[/]",
+            border_style="cyan",
+            padding=(0, 1),
+        ))
+
         if user_input.lower() in ("quit", "exit", "q"):
             console.print("[dim]Bye.[/]")
             break
@@ -49,7 +75,19 @@ def run():
             console.print("[dim]Session réinitialisée.[/]\n")
             continue
 
-        with console.status("[bold cyan]Réflexion...[/]", spinner="dots") as status:
+        t0 = time.time()
+        _stop_timer = threading.Event()
+
+        with console.status("", spinner="dots") as status:
+
+            def _run_timer():
+                while not _stop_timer.is_set():
+                    elapsed = time.time() - t0
+                    status.update(f"[bold cyan]Réflexion...  {elapsed:.1f}s[/]")
+                    time.sleep(0.1)
+
+            _timer_thread = threading.Thread(target=_run_timer, daemon=True)
+            _timer_thread.start()
 
             def on_tool(name: str, args: dict, result: str):
                 status.stop()
@@ -66,9 +104,37 @@ def run():
                 status.start()
                 return answer == "o"
 
-            response = agent.run(user_input, on_tool_call=on_tool, confirm_tool=confirm)
+            def user_choice(question: str, options: list[str]) -> str:
+                status.stop()
+                console.print(f"\n  [bold cyan]❓ {question}[/]")
+                for i, opt in enumerate(options, 1):
+                    console.print(f"     [cyan]{i}[/]  {opt}")
+                choices = [str(i) for i in range(1, len(options) + 1)]
+                idx = Prompt.ask("  Votre choix", choices=choices)
+                selected = options[int(idx) - 1]
+                console.print(f"  [dim]→ {selected}[/]\n")
+                status.start()
+                return selected
 
-        console.print(Panel(response, title="[green]Agent[/]", border_style="green", padding=(0, 1)))
+            response = agent.run(
+                user_input,
+                on_tool_call=on_tool,
+                confirm_tool=confirm,
+                on_user_choice=user_choice,
+            )
+
+            _stop_timer.set()
+            _timer_thread.join(timeout=0.3)
+
+        total = time.time() - t0
+        console.print(f"  [dim]↳ {total:.1f}s[/]")
+
+        console.print(Panel(
+            response,
+            title=f"[green]Agent[/]  [dim]{now_fr()}[/]",
+            border_style="green",
+            padding=(0, 1),
+        ))
         console.print()
 
 
