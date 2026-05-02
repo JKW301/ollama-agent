@@ -11,6 +11,10 @@ TOOL_RETRY_DELAY_SECONDS = 0.35
 SESSION_DIR = ".agent_sessions"
 LOG_DIR = ".agent_logs"
 AUTO_SAVE_SESSION = True
+MAX_CONTEXT_MESSAGES = 28
+MAX_CONTEXT_CHARS = 28000
+KEEP_RECENT_MESSAGES = 12
+TOOL_RESULT_SOFT_LIMIT = 1400
 
 # Mode de sécurité de l'agent: strict | balanced | open
 # - strict: blocage des refus et narrations activé
