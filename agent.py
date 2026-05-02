@@ -41,23 +41,64 @@ ASK_USER_SCHEMA = {
 ALL_SCHEMAS = SCHEMAS + [ASK_USER_SCHEMA]
 
 # ── Routage : outils seulement si action détectée ─────────────────────────────
-_ACTION_WORDS = {
+_ACTION_VERBS = {
     "liste", "lister", "affiche", "afficher", "montre", "montrer",
     "lis", "lire", "ouvre", "ouvrir",
-    "écris", "écrire", "crée", "créer", "ajoute", "ajouter",
-    "supprime", "supprimer", "efface", "effacer", "enlève", "enlever",
-    "déplace", "déplacer", "copie", "copier", "renomme", "renommer",
-    "modifie", "modifier", "édite", "éditer",
-    "cherche", "chercher", "trouve", "trouver", "grep", "find", "recherche",
-    "exécute", "exécuter", "lance", "lancer", "run", "installe", "installer",
+    "ecris", "ecrire", "cree", "creer", "ajoute", "ajouter",
+    "redige", "rediger", "sauvegarde", "sauvegarder", "enregistre", "enregistrer",
+    "supprime", "supprimer", "efface", "effacer", "enleve", "enlever",
+    "deplace", "deplacer", "copie", "copier", "renomme", "renommer",
+    "modifie", "modifier", "edite", "editer",
+    "cherche", "chercher", "trouve", "trouver", "recherche",
+    "execute", "executer", "lance", "lancer", "run", "installe", "installer",
     "compile", "build", "teste", "tester",
-    "fichier", "dossier", "répertoire", "script", "code", "projet",
-    "processus", "variable", "environnement",
-    "git", "ssh", "http", "https", "url", "web", "fetch",
 }
 
+_ACTION_OBJECTS = {
+    "fichier", "fichiers", "txt", "texte", "dossier", "repertoire", "script", "code", "projet",
+    "processus", "variable", "environnement", "git", "ssh", "url", "web",
+    "commande", "terminal", "shell", "python", "json", "yaml",
+}
+
+_TOOL_NAMES = {
+    "list_files", "read_file", "write_file", "append_file", "delete_file",
+    "move_file", "copy_file", "make_dir", "delete_dir", "file_info",
+    "grep_search", "find_files", "run_shell", "ssh_exec", "web_fetch",
+    "http_request", "git_run", "get_cwd", "change_dir", "system_info",
+    "process_list", "env_get", "env_set", "ask_user",
+}
+
+_SHELL_PREFIXES = ("ls ", "cd ", "pwd", "cat ", "mv ", "cp ", "rm ", "mkdir ", "touch ", "git ", "python ", "pip ")
+_PATH_OR_FILE_RE = re.compile(r"(~/|/[\w\-.]+|[.\w\-/]+\.(txt|md|py|json|yaml|yml|sh|csv|log)\b)")
+
+
+def _normalize_text(text: str) -> str:
+    lowered = text.strip().lower()
+    normalized = unicodedata.normalize("NFKD", lowered)
+    ascii_only = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    return ascii_only
+
+
 def _needs_tools(text: str) -> bool:
-    return bool(set(text.lower().split()) & _ACTION_WORDS)
+    normalized = _normalize_text(text)
+    if not normalized:
+        return False
+    if any(name in normalized for name in _TOOL_NAMES):
+        return True
+    if any(normalized.startswith(prefix) for prefix in _SHELL_PREFIXES):
+        return True
+    if _PATH_OR_FILE_RE.search(normalized):
+        return True
+
+    tokens = set(re.findall(r"[a-z0-9_:+-]+", normalized))
+    if not tokens:
+        return False
+
+    has_verb = bool(tokens & _ACTION_VERBS)
+    has_object = bool(tokens & _ACTION_OBJECTS)
+    strong_exec = bool(tokens & {"execute", "executer", "run", "installe", "installer", "build", "compile"})
+
+    return strong_exec or (has_verb and has_object)
 
 
 # ── Détection narration ────────────────────────────────────────────────────────
