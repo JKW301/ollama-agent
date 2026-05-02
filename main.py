@@ -5,9 +5,12 @@ import threading
 import argparse
 import json
 from datetime import datetime
+from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer, Completion
 
 from agent import Agent
 from config import (
@@ -27,6 +30,30 @@ def now_fr() -> str:
     return f"{d.day:02d} {MOIS[d.month-1]} {d.year}  {d.hour:02d}h{d.minute:02d}"
 
 console = Console()
+SLASH_COMMANDS = [
+    ("/stats", "Afficher les stats de la session courante"),
+    ("/stats all", "Afficher les stats globales (tous les logs)"),
+    ("/reset", "Réinitialiser la session"),
+    ("/quit", "Quitter l'application"),
+]
+
+
+class SlashCompleter(Completer):
+    def __init__(self, commands: list[tuple[str, str]]):
+        self.commands = commands
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor.strip()
+        if not text.startswith("/"):
+            return
+        for cmd, desc in self.commands:
+            if cmd.startswith(text):
+                yield Completion(
+                    cmd,
+                    start_position=-len(text),
+                    display=cmd,
+                    display_meta=desc,
+                )
 
 def render_banner(safety_mode: str) -> str:
     return f"""[cyan]              NNNN[black]..............[/black]NN[black]......[/black]NN[/cyan]
@@ -132,7 +159,7 @@ def run():
 
     while True:
         try:
-            user_input = Prompt.ask("[bold cyan]>>>[/]")
+            user_input = prompt_session.prompt(">>> ")
         except (EOFError, KeyboardInterrupt):
             console.print("\n[dim]Bye.[/]")
             break
@@ -140,6 +167,14 @@ def run():
         user_input = user_input.strip()
         if not user_input:
             continue
+        if user_input == "/":
+            console.print("[dim]Utilise les flèches ↑/↓ pour choisir une commande slash, puis Entrée.[/]")
+            console.print("[dim]Exemples: /stats, /stats all, /reset, /quit[/]\n")
+            continue
+        if user_input.lower() == "/quit":
+            user_input = "quit"
+        elif user_input.lower() == "/reset":
+            user_input = "reset"
 
         sys.stdout.write("\033[1A\033[2K\r")
         sys.stdout.flush()
