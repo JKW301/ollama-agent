@@ -13,6 +13,10 @@ from config import (
     NUM_PREDICT,
     AGENT_SAFETY_MODE,
     SESSION_DIR,
+    MAX_CONTEXT_MESSAGES,
+    MAX_CONTEXT_CHARS,
+    KEEP_RECENT_MESSAGES,
+    TOOL_RESULT_SOFT_LIMIT,
 )
 from tools import SCHEMAS, dispatch
 
@@ -184,6 +188,49 @@ def _to_plain_data(value):
             pass
     return str(value)
 
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    head = int(max_chars * 0.7)
+    tail = max_chars - head
+    return (
+        text[:head]
+        + f"\n... [tronque {len(text) - max_chars} chars] ...\n"
+        + text[-tail:]
+    )
+
+
+def _compact_message(msg: dict) -> dict:
+    role = msg.get("role", "")
+    compact = {"role": role}
+    if "name" in msg:
+        compact["name"] = msg["name"]
+    content = msg.get("content", "")
+    if isinstance(content, str):
+        if role == "tool":
+            content = _truncate_text(content, TOOL_RESULT_SOFT_LIMIT)
+        elif role in {"assistant", "user"}:
+            content = _truncate_text(content, 3000)
+    compact["content"] = content
+    return compact
+
+
+def _summarize_message(msg: dict) -> str | None:
+    role = msg.get("role")
+    content = (msg.get("content") or "").strip()
+    if not content:
+        return None
+    content = content.replace("\n", " ")
+    if role == "user":
+        return f"User: {content[:140]}"
+    if role == "assistant":
+        return f"Assistant: {content[:140]}"
+    if role == "tool":
+        name = msg.get("name", "tool")
+        return f"Tool {name}: {content[:140]}"
+    return None
+
 def _extract_and_write(content: str, on_tool_call: Callable[[str, dict, str], None] | None = None) -> str | None:
     """Extrait les blocs de code d'une réponse narrative et les écrit sur disque."""
     blocks = re.findall(r"```(\w*)\n(.*?)```", content, re.S)
@@ -308,6 +355,13 @@ class Agent:
         self.safety_mode = _normalize_safety_mode(safety_mode or AGENT_SAFETY_MODE)
         self.session_path = session_path
         self.messages: list[dict] = [{"role": "system", "content": _build_system_prompt(self.safety_mode)}]
+        self.last_context_stats: dict = {
+            "input_messages": 1,
+            "output_messages": 1,
+            "input_chars": len(self.messages[0].get("content", "")),
+            "output_chars": len(self.messages[0].get("content", "")),
+            "compressed": False,
+        }
 
     def reset(self):
         self.messages = [{"role": "system", "content": _build_system_prompt(self.safety_mode)}]
@@ -359,9 +413,10 @@ class Agent:
 
         for _ in range(MAX_STEPS):
             try:
+                model_messages = self._build_model_messages()
                 response = ollama.chat(
                     model=MODEL,
-                    messages=self.messages,
+                    messages=model_messages,
                     tools=ALL_SCHEMAS if use_tools else [],
                     options={"temperature": TEMPERATURE, "num_predict": NUM_PREDICT},
                 )
@@ -465,6 +520,70 @@ class Agent:
                     })
 
                 last_tool_results.append(result)
-                self.messages.append({"role": "tool", "content": result, "name": name})
+                self.messages.append({
+                    "role": "tool",
+                    "content": _truncate_text(result, TOOL_RESULT_SOFT_LIMIT * 2),
+                    "name": name,
+                })
 
         return "[ERR] Nombre maximum d'étapes atteint."
+
+    def _build_model_messages(self) -> list[dict]:
+        msgs = [_compact_message(m) for m in self.messages]
+        if not msgs:
+            self.last_context_stats = {
+                "input_messages": 0,
+                "output_messages": 0,
+                "input_chars": 0,
+                "output_chars": 0,
+                "compressed": False,
+            }
+            return msgs
+
+        system_msg = msgs[0]
+        body = msgs[1:]
+        input_chars = sum(len((m.get("content") or "")) for m in msgs)
+        if len(body) <= MAX_CONTEXT_MESSAGES and input_chars <= MAX_CONTEXT_CHARS:
+            self.last_context_stats = {
+                "input_messages": len(msgs),
+                "output_messages": len(msgs),
+                "input_chars": input_chars,
+                "output_chars": input_chars,
+                "compressed": False,
+            }
+            return msgs
+
+        keep = max(4, KEEP_RECENT_MESSAGES)
+        old = body[:-keep] if len(body) > keep else []
+        recent = body[-keep:] if body else []
+
+        summary_lines: list[str] = []
+        for m in old:
+            line = _summarize_message(m)
+            if line:
+                summary_lines.append(line)
+            if len(summary_lines) >= 18:
+                break
+
+        if summary_lines:
+            summary_msg = {
+                "role": "system",
+                "content": "Contexte compacte des echanges precedents:\n- " + "\n- ".join(summary_lines),
+            }
+            compacted = [system_msg, summary_msg] + recent
+        else:
+            compacted = [system_msg] + recent
+
+        # Bornage final par taille globale
+        total = sum(len((m.get("content") or "")) for m in compacted)
+        while len(compacted) > 2 and total > MAX_CONTEXT_CHARS:
+            dropped = compacted.pop(2)
+            total -= len((dropped.get("content") or ""))
+        self.last_context_stats = {
+            "input_messages": len(msgs),
+            "output_messages": len(compacted),
+            "input_chars": input_chars,
+            "output_chars": total,
+            "compressed": True,
+        }
+        return compacted
