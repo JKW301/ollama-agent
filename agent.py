@@ -1,9 +1,19 @@
 import json
+import os
 import re
+import unicodedata
 import ollama
 from typing import Callable
+from datetime import datetime
 
-from config import MODEL, MAX_STEPS, TEMPERATURE, NUM_PREDICT
+from config import (
+    MODEL,
+    MAX_STEPS,
+    TEMPERATURE,
+    NUM_PREDICT,
+    AGENT_SAFETY_MODE,
+    SESSION_DIR,
+)
 from tools import SCHEMAS, dispatch
 
 # ── ask_user : outil spécial géré par l'UI ────────────────────────────────────

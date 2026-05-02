@@ -1,4 +1,5 @@
 import json
+import time
 
 from tools.fs import list_files, read_file, write_file, append_file, delete_file
 from tools.fs import move_file, copy_file, make_dir, delete_dir, file_info
@@ -8,6 +9,7 @@ from tools.search import grep_search, find_files
 from tools.web import web_fetch, http_request
 from tools.git import git_run
 from tools.system import get_cwd, change_dir, system_info, process_list, env_get, env_set
+from config import TOOL_RETRY_MAX_ATTEMPTS, TOOL_RETRY_DELAY_SECONDS
 
 FUNCTIONS: dict = {
     # Fichiers
