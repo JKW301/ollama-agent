@@ -1,4 +1,4 @@
-MODEL = "mistral:latest"
+MODEL = "mistral-nemo:latest"
 MAX_STEPS = 15
 TEMPERATURE = 0.0
 NUM_PREDICT = 2048

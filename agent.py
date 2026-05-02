@@ -1,8 +1,26 @@
+import json
 import ollama
 from typing import Callable
 
 from config import MODEL, MAX_STEPS, TEMPERATURE, NUM_PREDICT
 from tools import SCHEMAS, dispatch
+
+
+def _extract_inline_tool_calls(content: str) -> list[dict] | None:
+    """Fallback: Mistral retourne parfois les tool calls en JSON dans le content."""
+    content = content.strip()
+    if not content.startswith("["):
+        return None
+    try:
+        data = json.loads(content)
+        if isinstance(data, list) and all(
+            isinstance(item, dict) and "name" in item and "arguments" in item
+            for item in data
+        ):
+            return [{"function": {"name": tc["name"], "arguments": tc["arguments"]}} for tc in data]
+    except (json.JSONDecodeError, KeyError):
+        pass
+    return None
 
 SYSTEM_PROMPT = """Tu es un assistant développeur CLI. Tu as accès à des outils pour:
 - Lire, écrire, lister des fichiers sur le système local
@@ -11,6 +29,9 @@ SYSTEM_PROMPT = """Tu es un assistant développeur CLI. Tu as accès à des outi
 
 Utilise les outils chaque fois que c'est nécessaire pour répondre à la demande.
 Tu peux enchaîner plusieurs appels d'outils dans une même conversation.
+
+Après avoir utilisé un outil, réponds en UNE PHRASE courte en français.
+Ne répète jamais le contenu brut retourné par l'outil dans ta réponse finale.
 Réponds toujours en français."""
 
 
@@ -47,6 +68,14 @@ class Agent:
             self.messages.append(msg)
 
             tool_calls = msg.get("tool_calls")
+
+            # Fallback : Mistral embed parfois les tool calls comme JSON dans content
+            if not tool_calls and msg.get("content"):
+                tool_calls = _extract_inline_tool_calls(msg["content"])
+                if tool_calls:
+                    # Remplace le message dans l'historique pour ne pas renvoyer le JSON brut
+                    self.messages[-1] = {"role": "assistant", "content": ""}
+
             if not tool_calls:
                 return msg.get("content", "")
 

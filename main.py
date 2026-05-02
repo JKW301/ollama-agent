@@ -18,12 +18,8 @@ BANNER = f"""[bold cyan]
 
 
 def display_tool_call(name: str, args: dict, result: str):
-    args_text = "\n".join(f"  [dim]{k}:[/] {str(v)[:200]}" for k, v in args.items())
-    header = f"[bold yellow]⚙ {name}[/]\n{args_text}"
-    console.print(Panel(header, border_style="yellow", padding=(0, 1)))
-
-    result_display = result if len(result) <= 3000 else result[:3000] + "\n[dim]... [tronqué][/]"
-    console.print(Panel(result_display, title="[dim]résultat[/]", border_style="dim", padding=(0, 1)))
+    args_text = "  ".join(f"[dim]{k}=[/]{str(v)[:120]!r}" for k, v in args.items())
+    console.print(f"  [bold yellow]⚙[/] [yellow]{name}[/]  {args_text}")
 
 
 def run():
