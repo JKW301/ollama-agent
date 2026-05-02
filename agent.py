@@ -157,6 +157,33 @@ _PROJECT_FILES = {"main.py", "agent.py", "config.py"}
 
 _TOOL_INVOCATION_RE = re.compile(r'^(\w+)\(\s*(\{.*\})\s*\)\s*$', re.S)
 
+def _to_plain_data(value):
+    """Convertit des objets SDK (ex: Message) en structures JSON-compatibles."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _to_plain_data(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_to_plain_data(v) for v in value]
+    if isinstance(value, tuple):
+        return [_to_plain_data(v) for v in value]
+    if hasattr(value, "model_dump") and callable(value.model_dump):
+        try:
+            return _to_plain_data(value.model_dump())
+        except Exception:
+            pass
+    if hasattr(value, "dict") and callable(value.dict):
+        try:
+            return _to_plain_data(value.dict())
+        except Exception:
+            pass
+    if hasattr(value, "__dict__"):
+        try:
+            return _to_plain_data(vars(value))
+        except Exception:
+            pass
+    return str(value)
+
 def _extract_and_write(content: str, on_tool_call: Callable[[str, dict, str], None] | None = None) -> str | None:
     """Extrait les blocs de code d'une réponse narrative et les écrit sur disque."""
     blocks = re.findall(r"```(\w*)\n(.*?)```", content, re.S)
@@ -320,8 +347,11 @@ class Agent:
         on_tool_call: Callable[[str, dict, str], None] | None = None,
         confirm_tool: Callable[[str, dict], bool] | None = None,
         on_user_choice: Callable[[str, list[str]], str] | None = None,
+        on_event: Callable[[dict], None] | None = None,
     ) -> str:
         self.messages.append({"role": "user", "content": user_input})
+        if on_event:
+            on_event({"type": "user_input", "content": user_input, "at": datetime.now().isoformat(timespec="seconds")})
 
         last_tool_results: list[str] = []
         use_tools = _needs_tools(user_input)
@@ -339,7 +369,15 @@ class Agent:
                 return f"[ERR] Ollama: {e}"
 
             msg = response["message"]
+            msg = _to_plain_data(msg)
             self.messages.append(msg)
+            if on_event:
+                on_event({
+                    "type": "assistant_message",
+                    "has_tool_calls": bool(msg.get("tool_calls")),
+                    "content_preview": (msg.get("content") or "")[:200],
+                    "at": datetime.now().isoformat(timespec="seconds"),
+                })
 
             tool_calls = msg.get("tool_calls")
 
