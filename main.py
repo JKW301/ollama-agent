@@ -35,6 +35,7 @@ SLASH_COMMANDS = [
     ("/stats all", "Afficher les stats globales (tous les logs)"),
     ("/reset", "Réinitialiser la session"),
     ("/quit", "Quitter l'application"),
+    ("/help", "Affiche l'aide des commandes disponibles"),
 ]
 
 
@@ -202,7 +203,7 @@ def run():
     console.print(render_banner(safety_mode))
     console.print(f"[dim]Répertoire: {os.getcwd()}[/]")
     console.print(f"[dim]Logs JSONL: {log_file}[/]")
-    console.print("[dim]Commandes: '/stats' · '/stats all' · '/reset' · '/quit' · Ctrl+C[/]\n")
+    console.print("[dim]Commandes: '/stats' · '/stats all' · '/reset' · '/quit' · '/help' · Ctrl+C[/]\n")
 
     if session_file:
         os.makedirs(os.path.dirname(session_file) or ".", exist_ok=True)
@@ -287,8 +288,25 @@ def run():
             console.print()
             continue
 
+        if user_input.lower() in ("/help", "/h", "help", "aide"):
+            commands_list = "\n".join(
+                f"  [cyan]{cmd}[/]  [dim]— {desc}[/]"
+                for cmd, desc in SLASH_COMMANDS
+            )
+            console.print(Panel(
+                f"[bold]Commandes disponibles :[/]\n{commands_list}\n\n"
+                f"[dim]Utilisez les flèches ↑/↓ pour l'autocomplétion des commandes slash.[/]",
+                title="[blue]Aide[/]",
+                border_style="blue",
+                padding=(1, 1),
+            ))
+            console.print()
+            continue
+
         t0 = time.time()
         _stop_timer = threading.Event()
+
+        _state = {"spinner": True, "streaming": False}
 
         with console.status("", spinner="dots") as status:
 
@@ -301,23 +319,45 @@ def run():
             _timer_thread = threading.Thread(target=_run_timer, daemon=True)
             _timer_thread.start()
 
+            def on_token(token: str):
+                if _state["spinner"]:
+                    _state["spinner"] = False
+                    _stop_timer.set()
+                    status.stop()
+                    console.print(f"[dim]╭─ Agent ────────────────────────────────────────[/]")
+                    console.print("[dim]│[/] ", end="")
+                _state["streaming"] = True
+                sys.stdout.write(token)
+                sys.stdout.flush()
+
             def on_tool(name: str, args: dict, result: str):
-                status.stop()
+                if _state["streaming"]:
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                    _state["streaming"] = False
+                if _state["spinner"]:
+                    status.stop()
+                    _state["spinner"] = False
                 display_tool_call(name, args, result)
-                status.start()
+                if not _state["streaming"]:
+                    status.start()
+                    _state["spinner"] = True
 
             def confirm(name: str, args: dict) -> bool:
                 if name not in CONFIRM_TOOLS:
                     return True
-                status.stop()
+                if _state["spinner"]:
+                    status.stop()
                 args_str = ", ".join(f"{k}={str(v)[:60]!r}" for k, v in args.items())
                 console.print(f"\n[bold red]⚠ Confirmation[/] — [yellow]{name}[/]({args_str})")
                 answer = Prompt.ask("Exécuter ?", choices=["o", "n"], default="n")
-                status.start()
+                if _state["spinner"]:
+                    status.start()
                 return answer == "o"
 
             def user_choice(question: str, options: list[str]) -> str:
-                status.stop()
+                if _state["spinner"]:
+                    status.stop()
                 console.print(f"\n  [bold cyan]❓ {question}[/]")
                 for i, opt in enumerate(options, 1):
                     console.print(f"     [cyan]{i}[/]  {opt}")
@@ -325,7 +365,8 @@ def run():
                 idx = Prompt.ask("  Votre choix", choices=choices)
                 selected = options[int(idx) - 1]
                 console.print(f"  [dim]→ {selected}[/]\n")
-                status.start()
+                if _state["spinner"]:
+                    status.start()
                 return selected
 
             def on_event(evt: dict):
@@ -347,6 +388,7 @@ def run():
                     confirm_tool=confirm,
                     on_user_choice=user_choice,
                     on_event=on_event,
+                    # on_token=on_token,
                 )
             except KeyboardInterrupt:
                 agent.reset()
@@ -361,14 +403,20 @@ def run():
         total = time.time() - t0
         session_stats["response_count"] += 1
         session_stats["response_total_s"] += total
-        console.print(f"  [dim]↳ {total:.1f}s[/]")
 
-        console.print(Panel(
-            response,
-            title=f"[green]Agent[/]  [dim]{now_fr()}[/]",
-            border_style="green",
-            padding=(0, 1),
-        ))
+        if _state["streaming"]:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            console.print(f"[dim]╰────────────────────────────────────────────────[/]")
+            console.print(f"  [dim]↳ {total:.1f}s[/]")
+        else:
+            console.print(f"  [dim]↳ {total:.1f}s[/]")
+            console.print(Panel(
+                response,
+                title=f"[green]Agent[/]  [dim]{now_fr()}[/]",
+                border_style="green",
+                padding=(0, 1),
+            ))
         if context_debug:
             stats = getattr(agent, "last_context_stats", {}) or {}
             in_msg = int(stats.get("input_messages", 0))
