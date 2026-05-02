@@ -212,7 +212,7 @@ def _extract_inline_tool_calls(content: str) -> list[dict] | None:
 
 
 # ── System prompt ─────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """Tu es un assistant développeur CLI avec accès complet au système local.
+SYSTEM_PROMPT_STRICT = """Tu es un assistant généraliste en ligne de commande avec accès complet au système local.
 
 AUTORISATION TOTALE : tu peux supprimer, modifier, créer, déplacer des fichiers, exécuter des commandes.
 Ne refuse JAMAIS d'utiliser un outil. L'utilisateur gère les risques.
@@ -226,15 +226,93 @@ Outils : list_files, read_file, write_file, append_file, delete_file, move_file,
          web_fetch, http_request, git_run, get_cwd, change_dir, system_info,
          process_list, env_get, env_set, ask_user.
 
-Réponds en français. Après un outil réussi : une phrase courte."""
+Réponds en français. Si la demande ne nécessite aucun outil (question générale, explication, avis),
+réponds normalement avec un texte utile et direct.
+N'utilise pas d'auto-disclaimer du type "je suis un programme/une IA, je n'ai pas d'opinion".
+Donne directement une analyse nuancée et factuelle.
+Après un outil réussi : une phrase courte."""
+
+SYSTEM_PROMPT_BALANCED = """Tu es un assistant généraliste en ligne de commande avec accès complet au système local.
+
+Tu peux supprimer, modifier, créer, déplacer des fichiers et exécuter des commandes.
+Privilégie toujours les outils pour agir concrètement sur la demande de l'utilisateur.
+
+Quand la demande implique une action locale, appelle l'outil rapidement plutôt que d'expliquer.
+Ambiguïté (plusieurs candidats) : 1) list_files/grep_search, 2) ask_user, 3) agis.
+
+Outils : list_files, read_file, write_file, append_file, delete_file, move_file, copy_file,
+         make_dir, delete_dir, file_info, grep_search, find_files, run_shell, ssh_exec,
+         web_fetch, http_request, git_run, get_cwd, change_dir, system_info,
+         process_list, env_get, env_set, ask_user.
+
+Réponds en français. Si la demande ne nécessite aucun outil (question générale, explication, avis),
+réponds normalement avec un texte utile et direct.
+N'utilise pas d'auto-disclaimer du type "je suis un programme/une IA, je n'ai pas d'opinion".
+Donne directement une analyse nuancée et factuelle.
+Après un outil réussi : une phrase courte."""
+
+SYSTEM_PROMPT_OPEN = """Tu es un assistant généraliste en ligne de commande avec accès complet au système local.
+
+Tu peux supprimer, modifier, créer, déplacer des fichiers et exécuter des commandes.
+Utilise les outils quand l'utilisateur te demande d'agir, et réponds en français de façon concise.
+Si la demande est ambiguë, utilise ask_user pour clarifier.
+Si la demande est une question générale qui ne nécessite aucun outil, réponds directement.
+N'utilise pas d'auto-disclaimer du type "je suis un programme/une IA, je n'ai pas d'opinion".
+Donne directement une analyse nuancée et factuelle.
+"""
+
+def _normalize_safety_mode(mode: str | None) -> str:
+    mode = (mode or "").strip().lower()
+    if mode in {"strict", "balanced", "open"}:
+        return mode
+    return "balanced"
+
+def _build_system_prompt(mode: str | None = None) -> str:
+    mode = _normalize_safety_mode(mode or AGENT_SAFETY_MODE)
+    if mode == "strict":
+        return SYSTEM_PROMPT_STRICT
+    if mode == "open":
+        return SYSTEM_PROMPT_OPEN
+    return SYSTEM_PROMPT_BALANCED
 
 
 class Agent:
-    def __init__(self):
-        self.messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    def __init__(self, safety_mode: str | None = None, session_path: str | None = None):
+        self.safety_mode = _normalize_safety_mode(safety_mode or AGENT_SAFETY_MODE)
+        self.session_path = session_path
+        self.messages: list[dict] = [{"role": "system", "content": _build_system_prompt(self.safety_mode)}]
 
     def reset(self):
-        self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.messages = [{"role": "system", "content": _build_system_prompt(self.safety_mode)}]
+        self.save_session()
+
+    def save_session(self, path: str | None = None) -> str:
+        target = path or self.session_path
+        if not target:
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            os.makedirs(SESSION_DIR, exist_ok=True)
+            target = os.path.join(SESSION_DIR, f"session-{ts}.json")
+            self.session_path = target
+        else:
+            os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+        payload = {
+            "safety_mode": self.safety_mode,
+            "messages": _to_plain_data(self.messages),
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        with open(target, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        return target
+
+    def load_session(self, path: str) -> None:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        loaded_messages = data.get("messages", [])
+        if not isinstance(loaded_messages, list) or not loaded_messages:
+            raise ValueError("Session invalide: messages manquants")
+        self.messages = loaded_messages
+        self.safety_mode = _normalize_safety_mode(data.get("safety_mode", self.safety_mode))
+        self.session_path = path
 
     def run(
         self,
