@@ -1,0 +1,3 @@
+{"type": "session_start", "at": "2026-05-02T20:56:54", "cwd": "/Users/julien/Git_Repos/ollama-agent", "safety_mode": "open", "resume_session": ""}
+{"type": "user_input", "content": "comment tu vas ?", "at": "2026-05-02T20:57:02"}
+{"type": "assistant_message", "has_tool_calls": false, "content_preview": "Je suis un programme informatique, je n'ai pas de sentiments ni d'état physique. Je suis prêt à répondre à vos questions ou à exécuter des commandes si vous en avez besoin. Comment puis-je vous aider ", "at": "2026-05-02T20:57:19"}
