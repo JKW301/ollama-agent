@@ -41,7 +41,7 @@ def display_tool_call(name: str, args: dict, result: str):
 def run():
     console.print(BANNER)
     console.print(f"[dim]Répertoire: {os.getcwd()}[/]")
-    console.print("[dim]Commandes: 'reset' pour nouvelle session · 'quit' pour quitter[/]\n")
+    console.print("[dim]Commandes: 'reset' pour nouvelle session · 'quit' pour quitter · Ctrl+C pour interrompre[/]\n")
 
     agent = Agent()
 
@@ -56,7 +56,6 @@ def run():
         if not user_input:
             continue
 
-        # Efface la ligne ">>> ..." et la remplace par le panneau
         sys.stdout.write("\033[1A\033[2K\r")
         sys.stdout.flush()
         console.print(Panel(
@@ -116,12 +115,19 @@ def run():
                 status.start()
                 return selected
 
-            response = agent.run(
-                user_input,
-                on_tool_call=on_tool,
-                confirm_tool=confirm,
-                on_user_choice=user_choice,
-            )
+            try:
+                response = agent.run(
+                    user_input,
+                    on_tool_call=on_tool,
+                    confirm_tool=confirm,
+                    on_user_choice=user_choice,
+                )
+            except KeyboardInterrupt:
+                agent.reset()
+                _stop_timer.set()
+                _timer_thread.join(timeout=0.3)
+                console.print("\n[bold yellow]⏹ Interrompu (Ctrl+C)[/]")
+                continue
 
             _stop_timer.set()
             _timer_thread.join(timeout=0.3)

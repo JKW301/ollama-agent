@@ -1,28 +1,27 @@
 import json
+import re
 import ollama
 from typing import Callable
 
 from config import MODEL, MAX_STEPS, TEMPERATURE, NUM_PREDICT
 from tools import SCHEMAS, dispatch
 
-# ask_user est un outil spécial géré par l'UI, pas par dispatch
+# ── ask_user : outil spécial géré par l'UI ────────────────────────────────────
 ASK_USER_SCHEMA = {
     "type": "function",
     "function": {
         "name": "ask_user",
         "description": (
-            "Pose une question à l'utilisateur avec une liste de choix numérotés. "
-            "Utilise cet outil quand la cible d'une action est ambiguë (plusieurs fichiers possibles, etc.). "
-            "Étapes : 1) list_files ou grep_search pour trouver les candidats, "
-            "2) ask_user pour que l'utilisateur choisisse, "
-            "3) exécute l'action sur l'élément choisi."
+            "Pose une question à l'utilisateur avec des choix numérotés. "
+            "Utilise-le quand la cible est ambiguë : "
+            "1) cherche les candidats, 2) appelle ask_user, 3) agis sur le choix."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "question": {"type": "string",  "description": "La question à poser"},
+                "question": {"type": "string",  "description": "La question"},
                 "options":  {"type": "array",   "items": {"type": "string"},
-                             "description": "Liste des options proposées"},
+                             "description": "Liste des options"},
             },
             "required": ["question", "options"],
         },
@@ -31,42 +30,49 @@ ASK_USER_SCHEMA = {
 
 ALL_SCHEMAS = SCHEMAS + [ASK_USER_SCHEMA]
 
+# ── Routage : outils seulement si action détectée ─────────────────────────────
 _ACTION_WORDS = {
-    # Fichiers
     "liste", "lister", "affiche", "afficher", "montre", "montrer",
     "lis", "lire", "ouvre", "ouvrir",
     "écris", "écrire", "crée", "créer", "ajoute", "ajouter",
     "supprime", "supprimer", "efface", "effacer", "enlève", "enlever",
     "déplace", "déplacer", "copie", "copier", "renomme", "renommer",
     "modifie", "modifier", "édite", "éditer",
-    # Recherche
     "cherche", "chercher", "trouve", "trouver", "grep", "find", "recherche",
-    # Shell / système
     "exécute", "exécuter", "lance", "lancer", "run", "installe", "installer",
     "compile", "build", "teste", "tester",
-    # Objets
     "fichier", "dossier", "répertoire", "script", "code", "projet",
     "processus", "variable", "environnement",
-    # Protocoles / web
     "git", "ssh", "http", "https", "url", "web", "fetch",
 }
 
 def _needs_tools(text: str) -> bool:
-    """Renvoie True si le message contient des mots qui suggèrent une action."""
-    words = set(text.lower().split())
-    return bool(words & _ACTION_WORDS)
+    return bool(set(text.lower().split()) & _ACTION_WORDS)
 
 
-_NARRATION_PREFIXES = (
-    "je vais", "voici comment", "pour ce faire",
-    "permettez-moi", "allow me", "i will", "i'll", "let me",
+# ── Détection narration ────────────────────────────────────────────────────────
+_NARRATION_STARTS = (
+    "je vais", "voici comment", "pour ce faire", "permettez-moi",
+    "allow me", "i will", "i'll", "let me",
+    "je crée", "je créé", "j'exécute", "je compile", "je lance",
+    "je lis ", "je liste", "je supprime", "je déplace", "je copie",
+    "j'écris", "je génère", "je modifie", "je construis",
+    "pour créer", "pour écrire", "pour exécuter", "pour compiler",
+    "voici le fichier", "voici le code", "voici le script", "voici un",
+    "here is", "here's",
 )
 
-def _is_narration(content: str) -> bool:
+def _is_narration(content: str, in_action_context: bool = True) -> bool:
     lower = content.strip().lower()
-    return any(lower.startswith(p) for p in _NARRATION_PREFIXES)
+    if any(lower.startswith(p) for p in _NARRATION_STARTS):
+        return True
+    # Bloc de code = narration, seulement en contexte d'action
+    if in_action_context and "```" in content and len(content) > 60:
+        return True
+    return False
 
 
+# ── Détection refus ───────────────────────────────────────────────────────────
 _REFUSAL_PATTERNS = (
     "je suis désolé, mais je ne peux pas",
     "je ne peux pas supprimer",
@@ -82,6 +88,60 @@ def _is_refusal(content: str) -> bool:
     return any(p in lower for p in _REFUSAL_PATTERNS)
 
 
+# ── Fallback : extraction de code depuis une narration ────────────────────────
+_LANG_EXT = {
+    "c": "main.c", "cpp": "main.cpp", "c++": "main.cpp",
+    "python": "script.py", "py": "script.py",
+    "javascript": "script.js", "js": "script.js",
+    "typescript": "script.ts", "ts": "script.ts",
+    "rust": "main.rs", "go": "main.go", "java": "Main.java",
+    "bash": "script.sh", "sh": "script.sh",
+    "html": "index.html", "css": "style.css",
+    "sql": "query.sql", "json": "data.json",
+    "yaml": "config.yaml", "yml": "config.yaml",
+}
+
+# Fichiers du projet à ne jamais écraser via le fallback narratif
+_PROJECT_FILES = {"main.py", "agent.py", "config.py"}
+
+_TOOL_INVOCATION_RE = re.compile(r'^(\w+)\(\s*(\{.*\})\s*\)\s*$', re.S)
+
+def _extract_and_write(content: str) -> str | None:
+    """Extrait les blocs de code d'une réponse narrative et les écrit sur disque."""
+    blocks = re.findall(r"```(\w*)\n(.*?)```", content, re.S)
+    if not blocks:
+        return None
+
+    results = []
+    for lang, code in blocks:
+        code = code.strip()
+        if not code or len(code) < 5:
+            continue
+
+        # Si le bloc est un appel de tool (ex: write_file({...})), l'exécuter directement
+        m = _TOOL_INVOCATION_RE.match(code)
+        if m:
+            name, args_str = m.group(1), m.group(2)
+            try:
+                args = json.loads(args_str)
+                result = dispatch(name, args)
+                results.append(result)
+                continue
+            except (json.JSONDecodeError, Exception):
+                pass
+
+        filename = _LANG_EXT.get(lang.lower(), f"output.{lang}" if lang else "output.txt")
+        if filename in _PROJECT_FILES:
+            filename = f"generated_{filename}"
+
+        from tools.fs import write_file
+        result = write_file(filename, code)
+        results.append(result)
+
+    return "\n".join(results) if results else None
+
+
+# ── Fallback inline tool calls (Mistral 7B) ───────────────────────────────────
 def _extract_inline_tool_calls(content: str) -> list[dict] | None:
     content = content.strip()
     if not content.startswith("["):
@@ -98,29 +158,22 @@ def _extract_inline_tool_calls(content: str) -> list[dict] | None:
     return None
 
 
+# ── System prompt ─────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """Tu es un assistant développeur CLI avec accès complet au système local.
 
-AUTORISATION TOTALE : L'utilisateur t'a accordé la permission complète d'utiliser TOUS tes outils sans restriction.
-Tu PEUX et DOIS supprimer, modifier, créer, déplacer des fichiers, exécuter des commandes, etc.
-Ne refuse JAMAIS d'utiliser un outil sous prétexte que c'est dangereux — l'utilisateur gère les risques.
+AUTORISATION TOTALE : tu peux supprimer, modifier, créer, déplacer des fichiers, exécuter des commandes.
+Ne refuse JAMAIS d'utiliser un outil. L'utilisateur gère les risques.
 
-RÈGLE D'ACTION : Dès qu'un outil répond à la demande, appelle-le immédiatement. Ne décris pas, n'explique pas, agis.
+RÈGLE ABSOLUE : appelle l'outil immédiatement. Ne décris pas, n'explique pas, n'écris pas de code dans ta réponse.
 
-Quand la cible est ambiguë (fichier introuvable, nom approximatif, plusieurs candidats) :
-1. Appelle list_files ou grep_search pour trouver les candidats
-2. Appelle ask_user(question=..., options=[...]) pour que l'utilisateur choisisse
-3. Exécute l'action sur l'élément choisi
+Ambiguïté (plusieurs candidats) : 1) list_files/grep_search, 2) ask_user, 3) agis.
 
-Outils disponibles:
-  Fichiers  : list_files, read_file, write_file, append_file, delete_file, move_file, copy_file, make_dir, delete_dir, file_info
-  Recherche : grep_search, find_files
-  Shell/SSH : run_shell, ssh_exec
-  Web       : web_fetch, http_request
-  Git       : git_run
-  Système   : get_cwd, change_dir, system_info, process_list, env_get, env_set
-  UI        : ask_user
+Outils : list_files, read_file, write_file, append_file, delete_file, move_file, copy_file,
+         make_dir, delete_dir, file_info, grep_search, find_files, run_shell, ssh_exec,
+         web_fetch, http_request, git_run, get_cwd, change_dir, system_info,
+         process_list, env_get, env_set, ask_user.
 
-Réponds toujours en français. Après un outil réussi : une seule phrase courte."""
+Réponds en français. Après un outil réussi : une phrase courte."""
 
 
 class Agent:
@@ -141,6 +194,7 @@ class Agent:
 
         last_tool_results: list[str] = []
         use_tools = _needs_tools(user_input)
+        narration_retries = 0
 
         for _ in range(MAX_STEPS):
             try:
@@ -161,21 +215,36 @@ class Agent:
             if not tool_calls and msg.get("content"):
                 tool_calls = _extract_inline_tool_calls(msg["content"])
                 if tool_calls:
-                    use_tools = True  # activer les outils pour les tours suivants
+                    use_tools = True
                     self.messages[-1] = {"role": "assistant", "content": ""}
 
             if not tool_calls:
                 content = msg.get("content", "")
-                if _is_narration(content):
-                    self.messages.append({
-                        "role": "user",
-                        "content": "Appelle l'outil maintenant, ne l'annonce pas.",
-                    })
-                    continue
-                # Le modèle refuse malgré des outils déjà exécutés → renvoie le dernier résultat
-                if _is_refusal(content) and last_tool_results:
-                    return last_tool_results[-1]
+
+                if _is_narration(content, in_action_context=use_tools):
+                    if narration_retries < 1:
+                        narration_retries += 1
+                        self.messages.append({
+                            "role": "user",
+                            "content": "STOP. Appelle write_file ou run_shell maintenant. Pas de texte.",
+                        })
+                        continue
+                    else:
+                        # Fallback : on extrait et écrit le code directement
+                        extracted = _extract_and_write(content)
+                        if extracted:
+                            self.messages[-1] = {"role": "assistant", "content": extracted}
+                            return extracted
+                        return content
+
+                if last_tool_results and (not content or _is_refusal(content)):
+                    content = last_tool_results[-1]
+                    self.messages[-1] = {"role": "assistant", "content": content}
+                    return content
+
                 return content
+
+            narration_retries = 0  # reset si un outil est appelé
 
             for tc in tool_calls:
                 name = tc["function"]["name"]
@@ -186,14 +255,11 @@ class Agent:
                     except json.JSONDecodeError:
                         args = {}
 
-                # Outil spécial : sélecteur interactif
                 if name == "ask_user":
                     question = args.get("question", "Quel choix ?")
                     options  = args.get("options", [])
-                    if on_user_choice and options:
-                        result = on_user_choice(question, options)
-                    else:
-                        result = f"Options disponibles: {', '.join(options)}"
+                    result = on_user_choice(question, options) if (on_user_choice and options) \
+                             else f"Options: {', '.join(options)}"
                     self.messages.append({"role": "tool", "content": result, "name": name})
                     continue
 
