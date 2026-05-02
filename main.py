@@ -34,8 +34,12 @@ BANNER = f"""[cyan]              NNNN[black]..............[/black]NN[black].....
 
 
 def display_tool_call(name: str, args: dict, result: str):
-    args_text = "  ".join(f"[dim]{k}=[/]{str(v)[:120]!r}" for k, v in args.items())
+    args_text = "  ".join(f"[dim]{k}=[/]{str(v)[:80]!r}" for k, v in args.items())
     console.print(f"  [bold yellow]⚙[/] [yellow]{name}[/]  {args_text}")
+    if result:
+        first_line = result.strip().split("\n")[0][:200]
+        color = "red" if result.startswith("[ERR]") else "green"
+        console.print(f"    [dim]↳[/] [{color}]{first_line}[/{color}]")
 
 
 def run():
