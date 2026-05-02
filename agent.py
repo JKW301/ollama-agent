@@ -233,7 +233,7 @@ class Agent:
                         continue
                     else:
                         # Fallback : on extrait et écrit le code directement
-                        extracted = _extract_and_write(content)
+                        extracted = _extract_and_write(content, on_tool_call)
                         if extracted:
                             self.messages[-1] = {"role": "assistant", "content": extracted}
                             return extracted
