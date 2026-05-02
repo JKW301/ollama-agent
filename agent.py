@@ -390,7 +390,18 @@ class Agent:
             if not tool_calls:
                 content = msg.get("content", "")
 
-                if _is_narration(content, in_action_context=use_tools):
+                if use_tools and narration_retries < 1:
+                    narration_retries += 1
+                    self.messages.append({
+                        "role": "user",
+                        "content": (
+                            "Action locale demandée. Appelle un outil maintenant "
+                            "(write_file/read_file/list_files/run_shell/etc). Pas de narration."
+                        ),
+                    })
+                    continue
+
+                if self.safety_mode != "open" and _is_narration(content, in_action_context=use_tools):
                     if narration_retries < 1:
                         narration_retries += 1
                         self.messages.append({
@@ -406,7 +417,11 @@ class Agent:
                             return extracted
                         return content
 
-                if last_tool_results and (not content or _is_refusal(content)):
+                if (
+                    self.safety_mode == "strict"
+                    and last_tool_results
+                    and (not content or _is_refusal(content))
+                ):
                     content = last_tool_results[-1]
                     self.messages[-1] = {"role": "assistant", "content": content}
                     return content
@@ -439,6 +454,15 @@ class Agent:
 
                 if on_tool_call:
                     on_tool_call(name, args, result)
+                if on_event:
+                    on_event({
+                        "type": "tool_call",
+                        "tool": name,
+                        "args": args,
+                        "result_preview": result[:300],
+                        "is_error": result.startswith("[ERR]"),
+                        "at": datetime.now().isoformat(timespec="seconds"),
+                    })
 
                 last_tool_results.append(result)
                 self.messages.append({"role": "tool", "content": result, "name": name})
