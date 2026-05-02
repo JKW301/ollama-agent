@@ -88,9 +88,23 @@ def dispatch(name: str, args: dict | str) -> str:
             args = {}
     if name not in FUNCTIONS:
         return f"[ERR] Outil inconnu: {name}"
-    try:
-        return str(FUNCTIONS[name](**args))
-    except TypeError as e:
-        return f"[ERR] Arguments invalides pour {name}: {e}"
-    except Exception as e:
-        return f"[ERR] {name}: {e}"
+    attempts = max(1, TOOL_RETRY_MAX_ATTEMPTS)
+    last_error = ""
+    for idx in range(attempts):
+        try:
+            return str(FUNCTIONS[name](**args))
+        except TypeError as e:
+            return f"[ERR] Arguments invalides pour {name}: {e}"
+        except Exception as e:
+            last_error = str(e)
+            # Erreurs temporaires/réseau: on peut retenter brièvement
+            err_lower = last_error.lower()
+            transient = any(
+                token in err_lower
+                for token in ("timeout", "tempor", "connection", "network", "resource busy", "timed out")
+            )
+            if idx < attempts - 1 and transient:
+                time.sleep(TOOL_RETRY_DELAY_SECONDS)
+                continue
+            break
+    return f"[ERR] {name}: {last_error}"
